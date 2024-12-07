@@ -3,11 +3,11 @@ import httpx
 
 app = FastAPI()
 
-# URLs for the Event Service and RSVP Service
-EVENT_SERVICE_URL = "http://54.163.85.145:8001" 
-RSVP_MANAGEMENT_URL = "http://54.227.224.254:8000" 
 
-# ORGANIZATIONS_URL = "http://54.235.60.238:<port_number>"  
+# URLs for the Event Service and RSVP Service
+EVENT_SERVICE_URL = "http://44.204.67.53:8001" 
+RSVP_MANAGEMENT_URL = "http://3.82.202.221:8000" 
+ORGANIZATIONS_URL = "http://18.234.239.121:8000"  
 
 @app.get("/")
 async def root():
@@ -16,7 +16,7 @@ async def root():
 @app.get("/event")
 async def get_event_details():
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{EVENT_SERVICE_URL}/events/2")
+        response = await client.get(f"{EVENT_SERVICE_URL}/events")
         response.raise_for_status()  # This will raise an error if the request fails
         return response.json()
     
@@ -27,6 +27,15 @@ async def get_rsvp_details():
         response.raise_for_status()  # This will raise an error if the request fails
         return response.json()
 
+@app.get("/organizations")
+async def get_organization(skip: int = 0, limit: int = 100):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{ORGANIZATIONS_URL}/organizations/",
+            params={"skip": skip, "limit": limit}
+        )
+        response.raise_for_status()
+        return response.json()
 
 """
     Composite Service to retrieve event details and RSVPs for a specific event.
@@ -80,3 +89,35 @@ async def get_event_rsvp_details(event_id: int):
         }
 
         return combined_data
+
+
+@app.get('/organization/event/{organization_id}')
+async def get_event_rsvp_details(organization_id: int):
+    async with httpx.AsyncClient() as client:
+        
+        # Fetch all events
+        try:
+            event_response = await client.get(f"{EVENT_SERVICE_URL}/events")
+            event_response.raise_for_status()
+            all_events = event_response.json()
+            # Filter events to only include those that match the organization_id
+            event_list = [event for event in all_events if event['organizationId'] == organization_id]
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        
+        
+        # Get organization details
+        try:
+            organization_details = await client.get(f"{ORGANIZATIONS_URL}/organizations/{organization_id}")
+            organization_details.raise_for_status()
+            organization_information = organization_details.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        
+        # Combine information
+        organization_and_events = {
+            "organization_information": organization_information,
+            "organization_events": event_list
+        }
+        
+        return organization_and_events
