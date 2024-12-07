@@ -1,10 +1,43 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import JSONResponse
 import httpx
+import uuid
+import time
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Setting up the middle wear
+class OrgEventMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # Set the start time in the request's state
+        request.state.start_time = time.time()
+
+        # Log the incoming request
+        request_id = uuid.uuid4()
+        request_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        logger.info(f"[{request_id}] Request to {request.url.path} received at {request_time}")
+
+        # Continue processing the request
+        response = await call_next(request)
+
+        # Log the response
+        response_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        process_time = time.time() - request.state.start_time
+        logger.info(
+            f"[{request_id}] Response from {request.url.path} completed at {response_time}: "
+            f"Status {response.status_code}, Processing time: {process_time:.2f} seconds"
+        )
+
+        return response
 
 app = FastAPI()
+app.add_middleware(OrgEventMiddleware)
 
-
-# URLs for the Event Service and RSVP Service
+# URLs for the Event Service and RSVP Service: 
 EVENT_SERVICE_URL = "http://44.204.67.53:8001" 
 RSVP_MANAGEMENT_URL = "http://3.82.202.221:8000" 
 ORGANIZATIONS_URL = "http://18.234.239.121:8000"  
@@ -89,7 +122,6 @@ async def get_event_rsvp_details(event_id: int):
         }
 
         return combined_data
-
 
 @app.get('/organization/event/{organization_id}')
 async def get_event_rsvp_details(organization_id: int):
