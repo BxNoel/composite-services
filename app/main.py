@@ -46,6 +46,7 @@ ORGANIZATIONS_URL = "http://18.234.239.121:8000"
 async def root():
     return {"message": "Hello World"}
 
+#Make this into a synchrnous service , where you just get all the events
 @app.get("/event")
 async def get_event_details():
     async with httpx.AsyncClient() as client:
@@ -53,6 +54,7 @@ async def get_event_details():
         response.raise_for_status()  # This will raise an error if the request fails
         return response.json()
     
+
 @app.get("/rsvp")
 async def get_rsvp_details():
     async with httpx.AsyncClient() as client:
@@ -60,6 +62,7 @@ async def get_rsvp_details():
         response.raise_for_status()  # This will raise an error if the request fails
         return response.json()
 
+#Make this into a synchrnous service , where you just get all the organizations
 @app.get("/organizations")
 async def get_organization(skip: int = 0, limit: int = 100):
     async with httpx.AsyncClient() as client:
