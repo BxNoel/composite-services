@@ -119,8 +119,8 @@ async def get_event_rsvp_details(event_id: int):
         ]
 
         #update rsvp_count
-        # rsvp_count = len(filtered_rsvp_list)
-        # event_details["rsvp_count"] = rsvp_count
+        rsvp_count = len(filtered_rsvp_list)
+        event_details["rsvp_count"] = rsvp_count
         
         # Combine Event and RSVP data
         combined_data = {
