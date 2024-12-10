@@ -38,9 +38,9 @@ app = FastAPI()
 app.add_middleware(OrgEventMiddleware)
 
 # URLs for the Event Service and RSVP Service: 
-EVENT_SERVICE_URL = "http://44.204.67.53:8001" 
-RSVP_MANAGEMENT_URL = "http://3.82.202.221:8000" 
-ORGANIZATIONS_URL = "http://18.234.239.121:8000"  
+EVENT_SERVICE_URL = "http://3.93.3.193:8001" 
+RSVP_MANAGEMENT_URL = "http://44.204.58.146:8000"  
+ORGANIZATIONS_URL = "http://34.203.31.254:8000" 
 
 @app.get("/")
 async def root():
@@ -119,8 +119,8 @@ async def get_event_rsvp_details(event_id: int):
         ]
 
         #update rsvp_count
-        rsvp_count = len(filtered_rsvp_list)
-        event_details["rsvp_count"] = rsvp_count
+        # rsvp_count = len(filtered_rsvp_list)
+        # event_details["rsvp_count"] = rsvp_count
         
         # Combine Event and RSVP data
         combined_data = {
