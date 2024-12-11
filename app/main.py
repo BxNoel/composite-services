@@ -38,9 +38,9 @@ app = FastAPI()
 app.add_middleware(OrgEventMiddleware)
 
 # URLs for the Event Service and RSVP Service: 
-EVENT_SERVICE_URL = "http://3.93.3.193:8001" 
-RSVP_MANAGEMENT_URL = "http://44.204.58.146:8000"  
-ORGANIZATIONS_URL = "http://34.203.31.254:8000" 
+EVENT_SERVICE_URL = "http://44.204.91.202:8001" 
+RSVP_MANAGEMENT_URL = "http://3.83.114.220:8000"  
+ORGANIZATIONS_URL = "http://3.94.198.42:8000" 
 
 @app.get("/")
 async def root():
