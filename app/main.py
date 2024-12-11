@@ -160,3 +160,56 @@ async def get_event_rsvp_details(organization_id: int):
         }
         
         return organization_and_events
+    
+
+
+
+from fastapi.responses import JSONResponse
+from graphql import graphql_sync, build_schema
+from graphql.error import GraphQLError
+from .graphql_schema import schema
+import requests
+
+# Build the GraphQL schema
+graphql_schema = build_schema(schema)
+
+# Resolvers for the GraphQL schema
+def resolve_events(_, info, limit=10):
+    try:
+        response = requests.get(f"http://3.93.219.196:8001/events?limit={limit}") #need to change with the EC2 IP 
+        response.raise_for_status()
+        events = response.json()
+        return events
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+def resolve_rsvps(_, info, limit=10):
+    try:
+        response = requests.get(f"http://18.206.156.98:8000/rsvp?limit={limit}")
+        response.raise_for_status()
+        return [response.json()]  
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Attach resolvers to the schema
+graphql_schema.query_type.fields["events"].resolve = resolve_events
+graphql_schema.query_type.fields["rsvps"].resolve = resolve_rsvps
+
+@app.post("/graphql")
+async def graphql_endpoint(request: Request):
+    body = await request.json()
+    query = body.get("query", "")
+    logger.info(f"Received GraphQL query: {query}")
+
+    variables = body.get("variables", {})
+    
+    # Execute the GraphQL query
+    result = graphql_sync(graphql_schema, query, variable_values=variables)
+    
+    if result.errors:
+        # Use `formatted` to serialize errors
+        formatted_errors = [error.formatted for error in result.errors]
+        return JSONResponse(status_code=400, content={"errors": formatted_errors})
+    
+    return JSONResponse(content={"data": result.data})
