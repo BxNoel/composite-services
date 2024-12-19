@@ -1,215 +1,209 @@
 from fastapi import FastAPI, HTTPException, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
-import uuid
-import time
+import asyncio
+import json
+from kafka import KafkaConsumer
+import threading
+import boto3
 import logging
 
-# Set up logging
+# Initialize FastAPI app
+app = FastAPI(title="COMPOSITE", version="1.0.0")
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for development
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
+
+@app.get("/", tags=["Root"])
+async def read_root():
+    return {"message": "Welcome!"}
+
+# Microservice URLs
+EVENT_SERVICE_URL = "http://localhost:8001"
+RSVP_MANAGEMENT_URL = "http://localhost:8003"
+ORGANIZATIONS_URL = "http://localhost:8000"
+
+# Step Functions client (AWS Orchestration)
+stepfunctions = boto3.client("stepfunctions", region_name="us-east-1")
+
+# Kafka Consumer Initialization
+consumer = KafkaConsumer(
+    'events_topic',
+    'rsvps_topic',
+    'organizations_topic',
+    bootstrap_servers='localhost:9092',
+    group_id='composite_service',
+    value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+)
+
+# In-memory caches for Kafka data
+event_cache = {}
+rsvp_cache = {}
+organization_cache = {}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Setting up the middle wear
-class OrgEventMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        # Set the start time in the request's state
-        request.state.start_time = time.time()
+# Consume Kafka messages
+def consume_kafka_messages():
+    for message in consumer:
+        topic = message.topic
+        data = message.value
 
-        # Log the incoming request
-        request_id = uuid.uuid4()
-        request_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        logger.info(f"[{request_id}] Request to {request.url.path} received at {request_time}")
+        if topic == "events_topic":
+            action = data.get("action")
+            if action == "create":
+                event_cache[data["event"]["id"]] = data["event"]
+            elif action == "delete":
+                event_cache.pop(data["event_id"], None)
+        elif topic == "rsvps_topic":
+            action = data.get("action")
+            if action == "create":
+                handle_new_rsvp(data)
+            elif action == "delete":
+                rsvp_cache.pop(data["rsvp_id"], None)
+        elif topic == "organizations_topic":
+            action = data.get("action")
+            if action == "create":
+                organization_cache[data["organization"]["id"]] = data["organization"]
+            elif action == "delete":
+                organization_cache.pop(data["organization_id"], None)
 
-        # Continue processing the request
-        response = await call_next(request)
+def handle_new_rsvp(data):
+    rsvp = data.get("rsvp")
+    event_id = data.get("event_id")
 
-        # Log the response
-        response_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        process_time = time.time() - request.state.start_time
-        logger.info(
-            f"[{request_id}] Response from {request.url.path} completed at {response_time}: "
-            f"Status {response.status_code}, Processing time: {process_time:.2f} seconds"
-        )
+    if not event_id or not rsvp:
+        logger.error("Invalid RSVP message format")
+        return
 
-        return response
+    try:
+        # Fetch the current event details from the events microservice
+        with httpx.Client() as client:
+            event_response = client.get(f"{EVENT_SERVICE_URL}/events/{event_id}")
+            event_response.raise_for_status()
+            event_details = event_response.json()
 
-app = FastAPI()
-app.add_middleware(OrgEventMiddleware)
+        # Increment the RSVP count
+        current_rsvp_count = event_details.get("rsvpCount", 0)
+        event_details["rsvpCount"] = current_rsvp_count + 1
 
-# URLs for the Event Service and RSVP Service: 
-EVENT_SERVICE_URL = "http://44.204.91.202:8001" 
-RSVP_MANAGEMENT_URL = "http:/3.83.114.220:8000"  
-ORGANIZATIONS_URL = "http://3.94.198.42:8000" 
+        # Send updated event details back to the events microservice
+        with httpx.Client() as client:
+            update_response = client.put(f"{EVENT_SERVICE_URL}/events/{event_id}", json=event_details)
+            update_response.raise_for_status()
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+        logger.info(f"Updated RSVP count for event {event_id} to {event_details['rsvpCount']}")
+    except Exception as e:
+        logger.error(f"Failed to update RSVP count for event {event_id}: {str(e)}")
 
-#Make this into a synchrnous service , where you just get all the events
-@app.get("/event")
-async def get_event_details():
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{EVENT_SERVICE_URL}/events")
-        response.raise_for_status()  # This will raise an error if the request fails
-        return response.json()
-    
 
-@app.get("/rsvp")
-async def get_rsvp_details():
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{RSVP_MANAGEMENT_URL}/rsvps/21")
-        response.raise_for_status()  # This will raise an error if the request fails
-        return response.json()
+# Start Kafka consumer thread
+@app.on_event("startup")
+def start_kafka_consumer():
+    threading.Thread(target=consume_kafka_messages, daemon=True).start()
 
-#Make this into a synchrnous service , where you just get all the organizations
-@app.get("/organizations")
-async def get_organization(skip: int = 0, limit: int = 100):
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{ORGANIZATIONS_URL}/organizations/",
-            params={"skip": skip, "limit": limit}
-        )
-        response.raise_for_status()
-        return response.json()
+# ========== 1. Synchronous API Calls ==========
+@app.get("/sync/events")
+def get_events_sync():
+    response = httpx.get(f"{EVENT_SERVICE_URL}/events")
+    response.raise_for_status()
+    return response.json()
 
-"""
-    Composite Service to retrieve event details and RSVPs for a specific event.
+@app.get("/sync/organizations")
+def get_organizations_sync(skip: int = 0, limit: int = 100):
+    response = httpx.get(f"{ORGANIZATIONS_URL}/organizations", params={"skip": skip, "limit": limit})
+    response.raise_for_status()
+    return response.json()
 
-    Steps:
-    1. Fetch event details from the EVENT_SERVICE based on the event ID.
-    2. Fetch RSVP details for the same event from the RSVP_MANAGEMENT service.
-    3. Filter the RSVP data to include only name, email, and status.
-    4. Combine the event details and filtered RSVP list into a single response.
-    5. Return the combined data as a JSON response.
-    
-"""
-@app.get("/event/{event_id}/rsvps")
+@app.get("/sync/rsvps/{event_id}")
+def get_rsvps_sync(event_id: int):
+    response = httpx.get(f"{RSVP_MANAGEMENT_URL}/events/{event_id}/rsvps/")
+    response.raise_for_status()
+    return response.json()
+
+@app.get("/sync/{event_id}", tags=["Composite"])
 async def get_event_rsvp_details(event_id: int):
     async with httpx.AsyncClient() as client:
-        
-        # Fetch information from EVENT_SERVICE
         try:
             event_response = await client.get(f"{EVENT_SERVICE_URL}/events/{event_id}")
-            event_response.raise_for_status()  # Raise an error for non-2xx responses
-            event_details = event_response.json()
-        except httpx.HTTPStatusError:
-            raise HTTPException(status_code=404, detail=f"Event with ID {event_id} not found.")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching event details: {str(e)}")
-        
-        # Fetch information from RSVP_MANAGEMENT
-        try:
-            rsvp_response = await client.get(f"{RSVP_MANAGEMENT_URL}/events/{event_id}/rsvps/")
-            rsvp_response.raise_for_status()  # Raise an error for non-2xx responses
-            rsvp_list = rsvp_response.json()
-        except httpx.HTTPStatusError:
-            raise HTTPException(status_code=404, detail=f"RSVP list for Event ID {event_id} not found.")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching RSVP details: {str(e)}")
-        
-        # Filter RSVP data to include only name, email, and status
-        filtered_rsvp_list = [
-            {
-                "name": rsvp.get("name"),
-                "email": rsvp.get("email"),
-                "status": rsvp.get("status")
-            }
-            for rsvp in rsvp_list
-        ]
-
-        #update rsvp_count
-        rsvp_count = len(filtered_rsvp_list)
-        event_details["rsvp_count"] = rsvp_count
-        
-        # Combine Event and RSVP data
-        combined_data = {
-            "Event_INFO": event_details,
-            "RSVP_LIST": filtered_rsvp_list
-        }
-
-        return combined_data
-
-@app.get('/organization/event/{organization_id}')
-async def get_event_rsvp_details(organization_id: int):
-    async with httpx.AsyncClient() as client:
-        
-        # Fetch all events
-        try:
-            event_response = await client.get(f"{EVENT_SERVICE_URL}/events")
             event_response.raise_for_status()
-            all_events = event_response.json()
-            # Filter events to only include those that match the organization_id
-            event_list = [event for event in all_events if event['organizationId'] == organization_id]
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=str(e))
-        
-        
-        # Get organization details
+            event_details = event_response.json()
+
+            rsvp_response = await client.get(f"{RSVP_MANAGEMENT_URL}/events/{event_id}/rsvps/")
+            rsvp_response.raise_for_status()
+            rsvp_list = rsvp_response.json()
+
+            combined_data = {
+                "Event_INFO": event_details,
+                "RSVP_LIST": rsvp_list
+            }
+
+            return combined_data
+        except httpx.HTTPStatusError:
+            raise HTTPException(status_code=404, detail="Event or RSVPs not found")
+
+# ========== 2. Asynchronous API Calls ==========
+@app.get("/async/composite-details/{event_id}")
+async def get_composite_details(event_id: int):
+    async with httpx.AsyncClient() as client:
         try:
-            organization_details = await client.get(f"{ORGANIZATIONS_URL}/organizations/{organization_id}")
-            organization_details.raise_for_status()
-            organization_information = organization_details.json()
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=str(e))
-        
-        # Combine information
-        organization_and_events = {
-            "organization_information": organization_information,
-            "organization_events": event_list
+            event_task = client.get(f"{EVENT_SERVICE_URL}/events/{event_id}")
+            rsvp_task = client.get(f"{RSVP_MANAGEMENT_URL}/events/{event_id}/rsvps")
+            org_task = client.get(f"{ORGANIZATIONS_URL}/organizations")
+            responses = await asyncio.gather(event_task, rsvp_task, org_task)
+
+            return {
+                "event": responses[0].json(),
+                "rsvps": responses[1].json(),
+                "organizations": responses[2].json()
+            }
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# ========== 3. Service Choreography (Pub/Sub) ==========
+@app.get("/choreography/events")
+def get_events_from_cache():
+    return {"events": list(event_cache.values())}
+
+@app.get("/choreography/rsvps")
+def get_rsvps_from_cache():
+    return {"rsvps": list(rsvp_cache.values())}
+
+@app.get("/choreography/organizations")
+def get_organizations_from_cache():
+    return {"organizations": list(organization_cache.values())}
+
+# ========== 4. Service Orchestration (Step Functions) ==========
+@app.post("/orchestrate/event/{event_id}")
+def orchestrate_event_workflow(event_id: int):
+    """
+    Start a Step Functions execution for orchestrating workflows related to an event.
+    """
+    input_payload = {
+        "event_id": event_id,
+        "event_service_url": EVENT_SERVICE_URL,
+        "rsvp_service_url": RSVP_MANAGEMENT_URL,
+        "organization_service_url": ORGANIZATIONS_URL
+    }
+
+    try:
+        response = stepfunctions.start_execution(
+            stateMachineArn="arn:aws:states:us-east-1:account-id:stateMachine:OrchestrateEventWorkflow",
+            input=json.dumps(input_payload),  # Pass input data for the workflow
+        )
+        logger.info(f"Started Step Function execution: {response['executionArn']}")
+        return {
+            "message": "Step Function execution started",
+            "executionArn": response["executionArn"]
         }
-        
-        return organization_and_events
-    
-
-
-
-from fastapi.responses import JSONResponse
-from graphql import graphql_sync, build_schema
-from graphql.error import GraphQLError
-from .graphql_schema import schema
-import requests
-
-# Build the GraphQL schema
-graphql_schema = build_schema(schema)
-
-# Resolvers for the GraphQL schema
-def resolve_events(_, info, limit=10):
-    try:
-        response = requests.get(f"http://3.93.219.196:8001/events?limit={limit}") #need to change with the EC2 IP 
-        response.raise_for_status()
-        events = response.json()
-        return events
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-def resolve_rsvps(_, info, limit=10):
-    try:
-        response = requests.get(f"http://18.206.156.98:8000/rsvp?limit={limit}")
-        response.raise_for_status()
-        return [response.json()]  
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Step Functions error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Step Functions error: {str(e)}")
 
-
-# Attach resolvers to the schema
-graphql_schema.query_type.fields["events"].resolve = resolve_events
-graphql_schema.query_type.fields["rsvps"].resolve = resolve_rsvps
-
-@app.post("/graphql")
-async def graphql_endpoint(request: Request):
-    body = await request.json()
-    query = body.get("query", "")
-    logger.info(f"Received GraphQL query: {query}")
-
-    variables = body.get("variables", {})
-    
-    # Execute the GraphQL query
-    result = graphql_sync(graphql_schema, query, variable_values=variables)
-    
-    if result.errors:
-        # Use `formatted` to serialize errors
-        formatted_errors = [error.formatted for error in result.errors]
-        return JSONResponse(status_code=400, content={"errors": formatted_errors})
-    
-    return JSONResponse(content={"data": result.data})
